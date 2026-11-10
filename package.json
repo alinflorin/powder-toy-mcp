@@ -1,6 +1,6 @@
 {
   "name": "powder-toy-mcp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "type": "module",
   "description": "MCP server exposing The Powder Toy as a fake CLI (pt read_instructions / pt execute)",
