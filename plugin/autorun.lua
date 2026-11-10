@@ -489,8 +489,11 @@ end
 local function tryConnect()
 	local ok, s = pcall(socket.tcp)
 	if not ok or not s then return end
+	-- never block the game thread: short timeout for connect, then fully non-blocking
+	pcall(function() s:settimeout(0.05) end)
 	local okc, res, err = pcall(function() return s:connect(HOST, PORT) end)
 	if okc and (res == 1 or res == true or res == nil and not err) then
+		pcall(function() s:settimeout(0) end)
 		sock, connected = s, true
 		log("connected to " .. HOST .. ":" .. PORT)
 	else
