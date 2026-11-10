@@ -1,0 +1,55 @@
+{
+  "name": "powder-toy-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MCP server exposing The Powder Toy as a fake CLI (pt read_instructions / pt execute)",
+  "bin": {
+    "powder-toy-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "start": "node dist/index.js",
+    "build": "tsc",
+    "typecheck": "tsc -p tsconfig.test.json",
+    "test": "tsx --test src/*.test.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/alinflorin/powder-toy-mcp.git"
+  },
+  "homepage": "https://github.com/alinflorin/powder-toy-mcp#readme",
+  "bugs": {
+    "url": "https://github.com/alinflorin/powder-toy-mcp/issues"
+  },
+  "keywords": [
+    "mcp",
+    "powder-toy",
+    "model-context-protocol"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist",
+    "plugin",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public",
+    "provenance": true
+  }
+}

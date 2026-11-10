@@ -2,7 +2,7 @@
 
 An [MCP](https://modelcontextprotocol.io) server that lets an AI client control [The Powder Toy](https://powdertoy.co.uk/) through a small, CLI-style tool surface.
 
-> **Status:** early stage. The design is settled; the implementation is not written yet.
+> **Status:** first implementation written. The MCP server is tested end to end against a fake plugin. The Lua plugin is untested inside the game (see Installation).
 
 ## How it works
 
@@ -37,11 +37,11 @@ MCP client ──stdio──> Node.js MCP server ──TCP──> Lua plugin (in
 
 ## Installation
 
-Not available yet. The plan is:
-
-1. Install dependencies for the MCP server (`npm install`).
-2. Copy or symlink the plugin's `autorun.lua` into the game's data folder (`~/.local/share/The Powder Toy/` on Linux).
-3. Register the MCP server with your client.
+1. `npm install`
+2. `ln -s "$PWD/plugin/autorun.lua" "$HOME/.local/share/The Powder Toy/autorun.lua"`
+3. The repo's `.mcp.json` registers the server for Claude Code (``npx tsx src/index.ts` (dev) or `node dist/index.js` after `npm run build``, TCP port 8787, override with `PT_PORT`).
+4. Start the MCP client first, then Powder Toy. The plugin retries the connection about every 2 seconds.
+5. In the game, run `pt execute "api sim"` to check which Lua functions exist. The plugin is written from memory of the v100 API, so a few calls may need adjusting.
 
 ## Notes
 
