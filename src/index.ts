@@ -4,6 +4,9 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import { Bridge } from "./bridge.js";
 import { INSTRUCTIONS } from "./instructions.js";
+import { installPlugin } from "./install.js";
+
+if (process.argv[2] === "install-plugin") process.exit(installPlugin(process.argv.slice(3)));
 
 const log = (m: string) => process.stderr.write(`[pt] ${m}\n`);
 const bridge = new Bridge({ port: Number(process.env.PT_PORT) || 8787, log });

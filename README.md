@@ -37,11 +37,17 @@ MCP client ──stdio──> Node.js MCP server ──TCP──> Lua plugin (in
 
 ## Installation
 
-1. `npm install`
-2. `ln -s "$PWD/plugin/autorun.lua" "$HOME/.local/share/The Powder Toy/autorun.lua"`
-3. The repo's `.mcp.json` registers the server for Claude Code (``npx tsx src/index.ts` (dev) or `node dist/index.js` after `npm run build``, TCP port 8787, override with `PT_PORT`).
-4. Start the MCP client first, then Powder Toy. The plugin retries the connection about every 2 seconds.
-5. In the game, run `pt execute "api sim"` to check which Lua functions exist. The plugin is written from memory of the v100 API, so a few calls may need adjusting.
+**From npm (recommended):**
+
+1. Install the plugin into the game: `npx powder-toy-mcp install-plugin` (copies `autorun.lua` into the game's data folder; add `--force` to overwrite a different `autorun.lua`, or pass a directory to override the location).
+2. Register the server with your MCP client, e.g. `claude mcp add pt -- npx -y powder-toy-mcp`.
+3. Start the MCP client first, then Powder Toy. The plugin retries the connection about every 2 seconds.
+4. In the game, run `pt execute "api sim"` to check which Lua functions exist. The plugin is written from memory of the v100 API, so a few calls may need adjusting.
+
+**From a checkout (development):**
+
+1. `npm install`, then `npm run dev` runs the server (the repo's `.mcp.json` does this for Claude Code). TCP port 8787, override with `PT_PORT`.
+2. `ln -s "$PWD/plugin/autorun.lua" "$HOME/.local/share/The Powder Toy/autorun.lua"` so edits to the plugin take effect on restart.
 
 ## Notes
 
