@@ -101,17 +101,110 @@ local function enum(s, names)
 	errorf("expected one of %s", table.concat(names, "|"))
 end
 
+-- walls: id <-> name, built from sim.walls (entries like [8] = "DEFAULT_WL_WALL")
+local wallNames, wallById
+local WALL_ALIAS = {
+	conductivewall = 1, ewall = 2, electricwall = 2, detector = 3, detect = 3, stream = 4, strm = 4, fan = 5,
+	liquid = 6, liquidwall = 6, absorb = 7, wall = 8, air = 9, allowair = 9, powder = 10, conductor = 11,
+	ehole = 12, gas = 13, gravity = 14, energy = 15, noair = 16, eraseall = 17, stasis = 18, eraser = 0,
+}
+local function buildWalls()
+	wallNames, wallById = {}, {}
+	for k, v in pairs(sim.walls or {}) do
+		if type(k) == "number" and type(v) == "string" then
+			local n = v:gsub("^DEFAULT_WL_", "")
+			wallById[k] = n
+			wallNames[n:lower()] = k
+		end
+	end
+	for n, id in pairs(WALL_ALIAS) do
+		if not wallNames[n] then wallNames[n] = id end
+	end
+end
+
 local function wallId(s)
+	if not wallNames then buildWalls() end
 	local n = tonumber(s)
 	if n then return floor(n) end
-	local key = "WL_" .. tostring(s):upper()
-	if sim[key] then return sim[key] end
-	errorf("unknown wall '%s'", tostring(s))
+	local id = wallNames[tostring(s):lower():gsub("^default_wl_", "")]
+	if id then return id end
+	errorf("unknown wall '%s' (try: walls)", tostring(s))
+end
+
+local WALL_COLOR = {
+	[1] = { 150, 150, 40 }, [2] = { 40, 160, 40 }, [3] = { 200, 120, 40 }, [4] = { 40, 120, 200 },
+	[5] = { 120, 120, 220 }, [6] = { 60, 60, 200 }, [7] = { 200, 60, 200 }, [8] = { 120, 120, 120 },
+	[9] = { 60, 60, 60 }, [10] = { 160, 140, 90 }, [11] = { 160, 160, 60 }, [12] = { 200, 40, 40 },
+	[13] = { 150, 200, 200 }, [14] = { 90, 90, 160 }, [15] = { 200, 200, 90 }, [16] = { 80, 80, 80 },
+	[18] = { 130, 90, 200 },
+}
+
+-- wall at pixel coordinates (wall map is 4x4-pixel cells)
+local function wallAt(x, y)
+	local ok, w = pcall(sim.wallMap, floor(x / 4), floor(y / 4))
+	if ok then return w or 0 end
+	return 0
 end
 
 local function prop(id, name)
 	local ok, v = pcall(sim.partProperty, id, name)
 	if ok then return v end
+end
+
+local function takeFlag(a, flag)
+	for i = #a, 1, -1 do
+		if a[i] == flag then table.remove(a, i); return true end
+	end
+	return false
+end
+
+local function box(a, i, names)
+	local x1, y1, x2, y2 = X(a[i], "x1"), Y(a[i + 1], "y1"), X(a[i + 2], "x2"), Y(a[i + 3], "y2")
+	return math.min(x1, x2), math.min(y1, y2), math.max(x1, x2), math.max(y1, y2)
+end
+
+-- iterate over particle ids (snapshot, so callers may kill/modify) with integer positions
+local function particles(pred)
+	local ids = {}
+	for id in sim.parts() do
+		local x, y = prop(id, "x"), prop(id, "y")
+		if x and y then
+			x, y = floor(x + 0.5), floor(y + 0.5)
+			if not pred or pred(x, y, id) then ids[#ids + 1] = id end
+		end
+	end
+	return ids
+end
+
+local function inBox(lx, ly, hx, hy)
+	return function(x, y) return x >= lx and x <= hx and y >= ly and y <= hy end
+end
+
+-- aggregate stats over a box: per-element counts, temperature and pressure
+local function stats(lx, ly, hx, hy)
+	local s = { counts = {}, total = 0, tsum = 0, tmax = nil, tmin = nil, pmax = nil, pmin = nil, psum = 0, pn = 0 }
+	for _, id in ipairs(particles(inBox(lx, ly, hx, hy))) do
+		local t = prop(id, "type")
+		s.counts[t] = (s.counts[t] or 0) + 1
+		s.total = s.total + 1
+		local T = prop(id, "temp")
+		if T then
+			s.tsum = s.tsum + T
+			if not s.tmax or T > s.tmax then s.tmax = T end
+			if not s.tmin or T < s.tmin then s.tmin = T end
+		end
+	end
+	for cy = floor(ly / 4), floor(hy / 4) do
+		for cx = floor(lx / 4), floor(hx / 4) do
+			local ok, p = pcall(sim.pressure, cx, cy)
+			if ok and p then
+				s.psum, s.pn = s.psum + p, s.pn + 1
+				if not s.pmax or p > s.pmax then s.pmax = p end
+				if not s.pmin or p < s.pmin then s.pmin = p end
+			end
+		end
+	end
+	return s
 end
 
 ---------------------------------------------------------------- environment
@@ -152,17 +245,21 @@ end
 local function render(scale, x1, y1, x2, y2)
 	local colorCache = {}
 	local w, h = x2 - x1 + 1, y2 - y1 + 1
-	local BLACK, WALLPX = "\0\0\0", string.char(60, 60, 60)
+	local BLACK = "\0\0\0"
 	local grid = {} -- (y - y1) * w + (x - x1) -> 3-byte pixel string
-	-- walls: sample once per 4x4 wall cell instead of per pixel
-	if tpt and tpt.get_wall then
-		for cy = floor(y1 / 4) * 4, y2, 4 do
-			for cx = floor(x1 / 4) * 4, x2, 4 do
-				local okw, wl = pcall(tpt.get_wall, cx, cy)
-				if okw and wl and wl ~= 0 then
-					for py = math.max(cy, y1), math.min(cy + 3, y2) do
-						for px = math.max(cx, x1), math.min(cx + 3, x2) do grid[(py - y1) * w + (px - x1)] = WALLPX end
-					end
+	-- walls: sample once per 4x4 wall cell (sim.wallMap takes cell coordinates)
+	local wallPx = {}
+	for cy = floor(y1 / 4) * 4, y2, 4 do
+		for cx = floor(x1 / 4) * 4, x2, 4 do
+			local wl = wallAt(cx, cy)
+			if wl ~= 0 then
+				local px = wallPx[wl]
+				if not px then
+					local c = WALL_COLOR[wl] or { 100, 100, 140 }
+					px = string.char(c[1], c[2], c[3]); wallPx[wl] = px
+				end
+				for py = math.max(cy, y1), math.min(cy + 3, y2) do
+					for pxx = math.max(cx, x1), math.min(cx + 3, x2) do grid[(py - y1) * w + (pxx - x1)] = px end
 				end
 			end
 		end
@@ -204,6 +301,7 @@ end
 
 ---------------------------------------------------------------- commands
 local C = {}
+local execute_line -- forward declaration (assigned after execute is defined)
 
 local function particleCount()
 	if sim.partCount then
@@ -229,7 +327,49 @@ function C.step(a)
 	elseif tpt and tpt.set_pause then
 		errorf("sim.framerender unavailable")
 	end
-	return string.format("stepped %d frame(s); paused", n)
+	return string.format("stepped %d frame(s); paused; particles=%s", n, tostring(particleCount()))
+end
+
+-- watch <frames> <every> [x1 y1 x2 y2]: step and print a stats line every <every> frames
+function C.watch(a)
+	local frames = num(a[1], "frames", 1, 100000)
+	local every = a[2] and num(a[2], "every", 1, 100000) or math.max(1, floor(frames / 10))
+	local lx, ly, hx, hy = 0, 0, XRES - 1, YRES - 1
+	if a[3] then lx, ly, hx, hy = box(a, 3) end
+	if not idName then buildNames() end
+	sim.paused(true)
+	local out, done = {}, 0
+	while done < frames do
+		local n = math.min(every, frames - done)
+		sim.framerender(n)
+		done = done + n
+		local s = stats(lx, ly, hx, hy)
+		local parts = {}
+		for t, c in pairs(s.counts) do parts[#parts + 1] = { idName[t] or tostring(t), c } end
+		table.sort(parts, function(p, q) return p[2] > q[2] end)
+		local els = {}
+		for i = 1, math.min(6, #parts) do els[#els + 1] = parts[i][1] .. "=" .. parts[i][2] end
+		out[#out + 1] = string.format("f+%d total=%d Tmax=%s Pmax=%s %s", done, s.total,
+			s.tmax and string.format("%.0f", s.tmax) or "-", s.pmax and string.format("%.1f", s.pmax) or "-", table.concat(els, " "))
+	end
+	return table.concat(out, "\n") .. "\n(paused)"
+end
+
+function C.undo() sim.historyRestore(); return "ok" end
+function C.redo() sim.historyForward(); return "ok" end
+function C.snapshot() sim.takeSnapshot(); return "snapshot taken (use undo to restore)" end
+
+function C.batch(_, raw)
+	local body = raw:gsub("^%s*batch%s*", "")
+	local out = {}
+	for cmd in (body .. ";"):gmatch("([^;]*);") do
+		if cmd:match("%S") then
+			local ok, res = execute_line(cmd)
+			out[#out + 1] = "> " .. cmd:gsub("^%s+", "") .. "\n" .. tostring(res)
+			if not ok then error(table.concat(out, "\n"), 0) end
+		end
+	end
+	return table.concat(out, "\n")
 end
 
 function C.clear()
@@ -238,9 +378,11 @@ function C.clear()
 end
 
 function C.draw(a)
+	local replace = takeFlag(a, "--replace")
 	local kind = a[1]
 	if kind == "pixel" then
 		local t, x, y = elemId(a[2]), X(a[3]), Y(a[4])
+		if replace then for _, id in ipairs(particles(inBox(x, y, x, y))) do sim.partKill(id) end end
 		sim.createParts(x, y, 0, 0, t)
 		return "ok"
 	elseif kind == "line" then
@@ -250,11 +392,15 @@ function C.draw(a)
 		return "ok"
 	elseif kind == "rect" then
 		local t = elemId(a[2])
-		local x1, y1, x2, y2 = X(a[3], "x1"), Y(a[4], "y1"), X(a[5], "x2"), Y(a[6], "y2")
-		sim.createBox(math.min(x1, x2), math.min(y1, y2), math.max(x1, x2), math.max(y1, y2), t)
+		local lx, ly, hx, hy = box(a, 3)
+		if replace then for _, id in ipairs(particles(inBox(lx, ly, hx, hy))) do sim.partKill(id) end end
+		sim.createBox(lx, ly, hx, hy, t)
 		return "ok"
 	elseif kind == "circle" then
 		local t, x, y, r = elemId(a[2]), X(a[3]), Y(a[4]), num(a[5], "r", 0, 200)
+		if replace then
+			for _, id in ipairs(particles(function(px, py) return (px - x) ^ 2 + (py - y) ^ 2 <= r * r + r end)) do sim.partKill(id) end
+		end
 		sim.createParts(x, y, r, r, t, sim.BRUSH_CIRCLE or 0)
 		return "ok"
 	elseif kind == "fill" then
@@ -263,20 +409,51 @@ function C.draw(a)
 		return string.format("filled %s particles", tostring(n))
 	elseif kind == "wall" then
 		local w = wallId(a[2])
-		local x1, y1, x2, y2 = X(a[3], "x1"), Y(a[4], "y1"), X(a[5], "x2"), Y(a[6], "y2")
-		local lx, ly = math.min(x1, x2), math.min(y1, y2)
-		sim.createWallBox(lx, ly, math.max(x1, x2), math.max(y1, y2), w)
+		local lx, ly, hx, hy = box(a, 3)
+		sim.createWallBox(lx, ly, hx, hy, w)
 		return "ok"
+	elseif kind == "hollow" then
+		-- hollow rectangle outline: draw hollow <elem> <x1> <y1> <x2> <y2> [thickness]
+		local t = elemId(a[2])
+		local lx, ly, hx, hy = box(a, 3)
+		local th = a[7] and num(a[7], "thickness", 1, 100) or 1
+		sim.createBox(lx, ly, hx, ly + th - 1, t)
+		sim.createBox(lx, hy - th + 1, hx, hy, t)
+		sim.createBox(lx, ly, lx + th - 1, hy, t)
+		sim.createBox(hx - th + 1, ly, hx, hy, t)
+		return "ok"
+	elseif kind == "tank" then
+		-- walled container: draw tank <wallname|id> <x1> <y1> <x2> <y2> [thickness]
+		local w = wallId(a[2])
+		local lx, ly, hx, hy = box(a, 3)
+		local th = a[7] and num(a[7], "thickness", 1, 100) or 4
+		sim.createWallBox(lx, ly, hx, ly + th - 1, w)
+		sim.createWallBox(lx, hy - th + 1, hx, hy, w)
+		sim.createWallBox(lx, ly, lx + th - 1, hy, w)
+		sim.createWallBox(hx - th + 1, ly, hx, hy, w)
+		return string.format("ok (inside: %d %d %d %d)", lx + th, ly + th, hx - th, hy - th)
 	end
-	errorf("usage: draw pixel|line|rect|circle|fill|wall ...")
+	errorf("usage: draw pixel|line|rect|circle|fill|wall|hollow|tank ... [--replace]")
 end
 
+-- erase [particles|walls] <x1> <y1> <x2> <y2>
 function C.erase(a)
-	local x1, y1, x2, y2 = X(a[1], "x1"), Y(a[2], "y1"), X(a[3], "x2"), Y(a[4], "y2")
-	local lx, ly, hx, hy = math.min(x1, x2), math.min(y1, y2), math.max(x1, x2), math.max(y1, y2)
-	sim.createBox(lx, ly, hx, hy, 0)
-	pcall(sim.createWallBox, lx, ly, hx, hy, 0)
+	local what = "both"
+	if a[1] == "particles" or a[1] == "walls" then what = table.remove(a, 1) end
+	local lx, ly, hx, hy = box(a, 1)
+	if what ~= "walls" then sim.createBox(lx, ly, hx, hy, 0) end
+	if what ~= "particles" then pcall(sim.createWallBox, lx, ly, hx, hy, 0) end
 	return "ok"
+end
+
+function C.walls()
+	if not wallNames then buildWalls() end
+	local ids = {}
+	for id in pairs(wallById) do ids[#ids + 1] = id end
+	table.sort(ids)
+	local out = {}
+	for _, id in ipairs(ids) do out[#out + 1] = id .. "=" .. wallById[id] end
+	return table.concat(out, " ") .. "\n(also accepted: WALL STREAM ERASEALL ... and ids; plain solid wall = 8)"
 end
 
 function C.elements()
@@ -314,30 +491,145 @@ function C.get(a)
 			if k == "type" then v = tostring(v) .. " (" .. tostring(idName[v] or "?") .. ")" end
 			out[#out + 1] = k .. "=" .. tostring(v)
 		end
-		local okw, wl = pcall(function() return tpt.get_wall(x, y) end)
-		if okw and wl and wl ~= 0 then out[#out + 1] = "wall=" .. wl end
+		local wl = wallAt(x, y)
+		if wl ~= 0 then out[#out + 1] = "wall=" .. wl .. " (" .. tostring(wallById and wallById[wl] or "?") .. ")" end
+		return table.concat(out, "\n")
+	elseif what == "wall" then
+		local x, y = X(a[2]), Y(a[3])
+		if not wallNames then buildWalls() end
+		local wl = wallAt(x, y)
+		return string.format("wall=%d (%s)", wl, wl == 0 and "none" or tostring(wallById[wl] or "?"))
+	elseif what == "cell" then
+		-- air/wall info for the 4x4 cell containing x,y
+		local x, y = X(a[2]), Y(a[3])
+		local cx, cy = floor(x / 4), floor(y / 4)
+		if not wallNames then buildWalls() end
+		local wl = wallAt(x, y)
+		local out = { string.format("cell=%d,%d", cx, cy), string.format("wall=%d (%s)", wl, wl == 0 and "none" or tostring(wallById[wl] or "?")) }
+		local okp, p = pcall(sim.pressure, cx, cy)
+		if okp then out[#out + 1] = "pressure=" .. tostring(p) end
+		local okx, vx = pcall(sim.velocityX, cx, cy)
+		local oky, vy = pcall(sim.velocityY, cx, cy)
+		if okx and oky then out[#out + 1] = "velocity=" .. tostring(vx) .. "," .. tostring(vy) end
+		local oka, at = pcall(sim.ambientHeat, cx, cy)
+		if oka and at then out[#out + 1] = "ambient_temp=" .. tostring(at) end
 		return table.concat(out, "\n")
 	elseif what == "area" then
-		local x1, y1, x2, y2 = X(a[2], "x1"), Y(a[3], "y1"), X(a[4], "x2"), Y(a[5], "y2")
-		local lx, ly, hx, hy = math.min(x1, x2), math.min(y1, y2), math.max(x1, x2), math.max(y1, y2)
+		local lx, ly, hx, hy = box(a, 2)
 		if not idName then buildNames() end
-		local counts, total = {}, 0
-		for id in sim.parts() do
-			local x, y = prop(id, "x"), prop(id, "y")
-			if x and y then
-				x, y = floor(x + 0.5), floor(y + 0.5)
-				if x >= lx and x <= hx and y >= ly and y <= hy then
-					local t = prop(id, "type")
-					counts[t] = (counts[t] or 0) + 1
-					total = total + 1
-				end
-			end
+		local s = stats(lx, ly, hx, hy)
+		local out = { "total=" .. s.total }
+		if s.tmax then
+			out[#out + 1] = string.format("temp_K avg=%.1f min=%.1f max=%.1f (avg %.1fC)", s.tsum / s.total, s.tmin, s.tmax, s.tsum / s.total - 273.15)
 		end
-		local out = { "total=" .. total }
-		for t, n in pairs(counts) do out[#out + 1] = (idName[t] or tostring(t)) .. "=" .. n end
+		if s.pn > 0 then
+			out[#out + 1] = string.format("pressure avg=%.2f min=%.2f max=%.2f", s.psum / s.pn, s.pmin, s.pmax)
+		end
+		for t, n in pairs(s.counts) do out[#out + 1] = (idName[t] or tostring(t)) .. "=" .. n end
 		return table.concat(out, "\n")
 	end
-	errorf("usage: get element|particle|area ...")
+	errorf("usage: get element|particle|wall|cell|area ...")
+end
+
+-- count [elem]: particles of one element (or all) on the whole screen
+function C.count(a)
+	if not idName then buildNames() end
+	if not a[1] then return tostring(particleCount()) end
+	local t = elemId(a[1])
+	local n = 0
+	for _, id in ipairs(particles()) do if prop(id, "type") == t then n = n + 1 end end
+	return string.format("%s=%d", idName[t], n)
+end
+
+-- find <elem> [x1 y1 x2 y2]: count, bounding box and a few sample positions
+function C.find(a)
+	local t = elemId(a[1])
+	local lx, ly, hx, hy = 0, 0, XRES - 1, YRES - 1
+	if a[2] then lx, ly, hx, hy = box(a, 2) end
+	local n, bx1, by1, bx2, by2, samples = 0, 1e9, 1e9, -1, -1, {}
+	for _, id in ipairs(particles(inBox(lx, ly, hx, hy))) do
+		if prop(id, "type") == t then
+			local x, y = floor(prop(id, "x") + 0.5), floor(prop(id, "y") + 0.5)
+			n = n + 1
+			bx1, by1, bx2, by2 = math.min(bx1, x), math.min(by1, y), math.max(bx2, x), math.max(by2, y)
+			if n <= 8 then samples[#samples + 1] = x .. "," .. y end
+		end
+	end
+	if n == 0 then return "none found" end
+	return string.format("count=%d bbox=%d %d %d %d samples=%s", n, bx1, by1, bx2, by2, table.concat(samples, " "))
+end
+
+-- replace <from> <to> [x1 y1 x2 y2]: change element type of matching particles
+function C.replace(a)
+	local from, to = elemId(a[1]), elemId(a[2])
+	local lx, ly, hx, hy = 0, 0, XRES - 1, YRES - 1
+	if a[3] then lx, ly, hx, hy = box(a, 3) end
+	local n = 0
+	for _, id in ipairs(particles(inBox(lx, ly, hx, hy))) do
+		if prop(id, "type") == from then sim.partChangeType(id, to); n = n + 1 end
+	end
+	return "replaced " .. n
+end
+
+local SETTABLE = { temp = true, life = true, ctype = true, tmp = true, tmp2 = true, tmp3 = true, tmp4 = true, vx = true, vy = true, dcolour = true }
+local function propValue(key, v)
+	if key == "temp" then
+		local s = tostring(v)
+		local c = s:match("^(-?[%d%.]+)[Cc]$")
+		if c then return tonumber(c) + 273.15 end
+		local k = tonumber((s:gsub("[Kk]$", "")))
+		if not k then errorf("bad temperature '%s' (kelvin, or e.g. 25C)", s) end
+		return k
+	elseif key == "ctype" then
+		local n = tonumber(v)
+		if n then return n end
+		return elemId(v)
+	end
+	local n = tonumber(v)
+	if not n then errorf("expected number for %s", key) end
+	return n
+end
+
+-- set particle <x> <y> <prop> <value>
+-- set area <x1> <y1> <x2> <y2> <prop> <value> [elem]
+function C.set(a)
+	if a[1] == "particle" then
+		local x, y, key = X(a[2]), Y(a[3]), a[4]
+		if not SETTABLE[key] then errorf("settable props: temp life ctype tmp tmp2 tmp3 tmp4 vx vy dcolour") end
+		local id = sim.partID(x, y)
+		if not id then errorf("no particle at %d,%d", x, y) end
+		sim.partProperty(id, key, propValue(key, a[5]))
+		return key .. "=" .. tostring(prop(id, key))
+	elseif a[1] == "area" then
+		local lx, ly, hx, hy = box(a, 2)
+		local key = a[6]
+		if not SETTABLE[key or ""] then errorf("settable props: temp life ctype tmp tmp2 tmp3 tmp4 vx vy dcolour") end
+		local v = propValue(key, a[7])
+		local only = a[8] and elemId(a[8])
+		local n = 0
+		for _, id in ipairs(particles(inBox(lx, ly, hx, hy))) do
+			if not only or prop(id, "type") == only then sim.partProperty(id, key, v); n = n + 1 end
+		end
+		return string.format("set %s=%s on %d particle(s)", key, tostring(v), n)
+	end
+	errorf("usage: set particle <x> <y> <prop> <value> | set area <x1> <y1> <x2> <y2> <prop> <value> [elem]")
+end
+
+-- stamps: stamp save <x1> <y1> <x2> <y2> | stamp load <name> <x> <y> | stamp list
+function C.stamp(a)
+	if a[1] == "save" then
+		local lx, ly, hx, hy = box(a, 2)
+		local name = sim.saveStamp(lx, ly, hx - lx + 1, hy - ly + 1)
+		return "saved stamp " .. tostring(name)
+	elseif a[1] == "load" then
+		if not a[2] then errorf("missing stamp name") end
+		sim.loadStamp(a[2], X(a[3]), Y(a[4]))
+		return "ok"
+	elseif a[1] == "list" then
+		local l = sim.listStamps and sim.listStamps() or {}
+		return #l > 0 and table.concat(l, " ") or "no stamps"
+	end
+	errorf("usage: stamp save <x1> <y1> <x2> <y2> | stamp load <name> <x> <y> | stamp list")
 end
 
 local function envLines()
@@ -357,7 +649,9 @@ function C.info()
 	local okf, fr = pcall(function() return sim.frameCount and sim.frameCount() or tpt.get_property and nil end)
 	if okf and fr then out[#out + 1] = "frame=" .. tostring(fr) end
 	for _, l in ipairs(envLines()) do out[#out + 1] = l end
-	local okn, name = pcall(function() return sim.getSaveOptions and nil end)
+	local s = stats(0, 0, XRES - 1, YRES - 1)
+	if s.tmax then out[#out + 1] = string.format("temp_K avg=%.1f min=%.1f max=%.1f", s.tsum / s.total, s.tmin, s.tmax) end
+	if s.pn > 0 then out[#out + 1] = string.format("pressure avg=%.2f min=%.2f max=%.2f", s.psum / s.pn, s.pmin, s.pmax) end
 	return table.concat(out, "\n")
 end
 
@@ -433,6 +727,7 @@ local function execute(line)
 	if not ok then return false, tostring(res) end
 	return true, res, kind
 end
+execute_line = execute
 
 ---------------------------------------------------------------- transport
 local sock, connected, rxbuf, ticks = nil, false, "", 0

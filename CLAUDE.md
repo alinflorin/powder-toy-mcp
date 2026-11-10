@@ -41,3 +41,4 @@ Plugin connects over TCP using the in-game `socket` library to the Node MCP serv
 - Keep the MCP surface small: `read_instructions` documents every command, `execute` takes a command string plus arguments.
 - Return structured, concise errors (unknown element, out-of-bounds coordinates, game not connected).
 - Verify Lua API availability against the installed Powder Toy version before relying on a function.
+- When I tell you release! - bump version, commit, tag with v, push

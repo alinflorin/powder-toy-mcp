@@ -12,15 +12,15 @@ const log = (m: string) => process.stderr.write(`[pt] ${m}\n`);
 const bridge = new Bridge({ port: Number(process.env.PT_PORT) || 8787, log });
 await bridge.listen();
 
-const server = new McpServer({ name: "pt", version: "0.1.0" });
+const server = new McpServer({ name: "pt", version: "0.1.0" }, { instructions: "Always call read_instructions first, before any execute call." });
 
-server.tool("read_instructions", "pt read_instructions: usage docs for every pt command", async () => ({
+server.tool("read_instructions", "pt read_instructions: READ THIS FIRST, before using execute. Returns usage docs for every pt command.", async () => ({
   content: [{ type: "text" as const, text: INSTRUCTIONS }],
 }));
 
 server.tool(
   "execute",
-  "pt execute: run a command against the running Powder Toy game. Call read_instructions first for the command list.",
+  "pt execute: run a command against the running Powder Toy game. IMPORTANT: call read_instructions first; it documents every command and its syntax.",
   { command: z.string().describe('Command line, e.g. "draw line DUST 10 10 200 10"') },
   async ({ command }) => {
     const cmd = command.trim().replace(/^pt\s+(execute\s+)?/, "");
