@@ -1,3 +1,4 @@
+import { pngFromRgbPayload } from "./png.js";
 import net from "node:net";
 
 export interface BridgeOptions {
@@ -23,7 +24,7 @@ interface Pending {
  * TCP bridge. The server listens; the in-game Lua plugin connects.
  * Protocol (newline-delimited):
  *   server -> plugin: "<id> <command string>\n"
- *   plugin -> server: "<id> <ok|err> <text|png> <base64 payload>\n"
+ *   plugin -> server: "<id> <ok|err> <text|png|rgb> <base64 payload>  (rgb = raw pixels, see png.ts)\n"
  */
 export class Bridge {
   readonly port: number;
@@ -93,14 +94,22 @@ export class Bridge {
   }
 
   #onLine(line: string) {
-    const m = /^(\d+) (ok|err) (text|png) ?(.*)$/.exec(line);
+    const m = /^(\d+) (ok|err) (text|png|rgb) ?(.*)$/.exec(line);
     if (!m) return this.log(`bad line from plugin: ${line.slice(0, 80)}`);
     const p = this.pending.get(Number(m[1]));
     if (!p) return;
     this.pending.delete(Number(m[1]));
     clearTimeout(p.timer);
     const payload = Buffer.from(m[4], "base64");
-    p.resolve({ ok: m[2] === "ok", kind: m[3] as "text" | "png", data: m[3] === "png" ? payload : payload.toString("utf8") });
+    const ok = m[2] === "ok";
+    if (m[3] === "rgb") {
+      try {
+        return p.resolve({ ok, kind: "png", data: pngFromRgbPayload(payload) });
+      } catch (e) {
+        return p.reject(new Error(`bad screenshot payload: ${(e as Error).message}`));
+      }
+    }
+    p.resolve({ ok, kind: m[3] as "text" | "png", data: m[3] === "png" ? payload : payload.toString("utf8") });
   }
 
   send(command: string): Promise<BridgeResult> {

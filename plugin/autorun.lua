@@ -39,62 +39,6 @@ local function b64(s)
 	return table.concat(out)
 end
 
----------------------------------------------------------------- PNG (stored deflate)
-local crcTable
-local function crc32(s, crc)
-	if not crcTable then
-		crcTable = {}
-		for i = 0, 255 do
-			local c = i
-			for _ = 1, 8 do
-				if bit.band(c, 1) == 1 then c = bit.bxor(0xEDB88320, bit.rshift(c, 1)) else c = bit.rshift(c, 1) end
-			end
-			crcTable[i] = c
-		end
-	end
-	crc = bit.bnot(crc or 0)
-	for i = 1, #s do
-		crc = bit.bxor(crcTable[bit.band(bit.bxor(crc, s:byte(i)), 0xFF)], bit.rshift(crc, 8))
-	end
-	return bit.bnot(crc)
-end
-
-local function be32(n) -- n may be negative (bit lib result)
-	n = n % 4294967296
-	return string.char(floor(n / 16777216) % 256, floor(n / 65536) % 256, floor(n / 256) % 256, n % 256)
-end
-
-local function chunk(tag, data)
-	return be32(#data) .. tag .. data .. be32(crc32(tag .. data))
-end
-
-local function adler32(s)
-	local a, b = 1, 0
-	for i = 1, #s do
-		a = (a + s:byte(i)) % 65521
-		b = (b + a) % 65521
-	end
-	return b * 65536 + a
-end
-
-local function encodePNG(w, h, rows) -- rows: table of raw RGB strings (w*3 bytes each)
-	local parts = {}
-	for y = 1, h do parts[y] = "\0" .. rows[y] end
-	local raw = table.concat(parts)
-	local z = { "\120\1" }
-	local pos, n = 1, #raw
-	while pos <= n do
-		local len = math.min(65535, n - pos + 1)
-		local final = (pos + len > n) and 1 or 0
-		z[#z + 1] = string.char(final, len % 256, floor(len / 256), (65535 - len) % 256, floor((65535 - len) / 256))
-		z[#z + 1] = raw:sub(pos, pos + len - 1)
-		pos = pos + len
-	end
-	z[#z + 1] = be32(adler32(raw))
-	local ihdr = be32(w) .. be32(h) .. "\8\2\0\0\0"
-	return "\137PNG\r\n\26\n" .. chunk("IHDR", ihdr) .. chunk("IDAT", table.concat(z)) .. chunk("IEND", "")
-end
-
 ---------------------------------------------------------------- helpers
 local XRES = sim.XRES or 612
 local YRES = sim.YRES or 384
@@ -208,40 +152,54 @@ end
 local function render(scale, x1, y1, x2, y2)
 	local colorCache = {}
 	local w, h = x2 - x1 + 1, y2 - y1 + 1
-	local hasWall = tpt and tpt.get_wall
-	local rows = {}
-	for y = y1, y2 do
-		local line = {}
-		for x = x1, x2 do
-			local r, g, b = 0, 0, 0
-			if hasWall then
-				local okw, wl = pcall(tpt.get_wall, x, y)
-				if okw and wl and wl ~= 0 then r, g, b = 60, 60, 60 end
+	local BLACK, WALLPX = "\0\0\0", string.char(60, 60, 60)
+	local grid = {} -- (y - y1) * w + (x - x1) -> 3-byte pixel string
+	-- walls: sample once per 4x4 wall cell instead of per pixel
+	if tpt and tpt.get_wall then
+		for cy = floor(y1 / 4) * 4, y2, 4 do
+			for cx = floor(x1 / 4) * 4, x2, 4 do
+				local okw, wl = pcall(tpt.get_wall, cx, cy)
+				if okw and wl and wl ~= 0 then
+					for py = math.max(cy, y1), math.min(cy + 3, y2) do
+						for px = math.max(cx, x1), math.min(cx + 3, x2) do grid[(py - y1) * w + (px - x1)] = WALLPX end
+					end
+				end
 			end
-			local id = sim.partID(x, y)
-			if id then
+		end
+	end
+	-- particles: iterate existing particles only (O(particles), not O(pixels))
+	for id in sim.parts() do
+		local x, y = prop(id, "x"), prop(id, "y")
+		if x and y then
+			x, y = floor(x + 0.5), floor(y + 0.5)
+			if x >= x1 and x <= x2 and y >= y1 and y <= y2 then
 				local t = prop(id, "type")
 				if t and t ~= 0 then
 					local deco = prop(id, "dcolour") or 0
 					local da = floor(deco / 16777216) % 256
 					local c = colorCache[t]
 					if not c then c = elemColor(t); colorCache[t] = c end
-					r, g, b = floor(c / 65536) % 256, floor(c / 256) % 256, c % 256
+					local r, g, b = floor(c / 65536) % 256, floor(c / 256) % 256, c % 256
 					if da > 0 then
 						local dr, dg, db = floor(deco / 65536) % 256, floor(deco / 256) % 256, deco % 256
 						r = floor((r * (255 - da) + dr * da) / 255)
 						g = floor((g * (255 - da) + dg * da) / 255)
 						b = floor((b * (255 - da) + db * da) / 255)
 					end
+					grid[(y - y1) * w + (x - x1)] = string.char(r, g, b)
 				end
 			end
-			local px = string.char(r, g, b)
-			line[#line + 1] = scale > 1 and px:rep(scale) or px
 		end
-		local row = table.concat(line)
-		for _ = 1, scale do rows[#rows + 1] = row end
 	end
-	return encodePNG(w * scale, h * scale, rows)
+	-- raw RGB; the MCP server scales and PNG-encodes it (keeps the game thread fast)
+	local rows = { string.char(floor(w / 256), w % 256, floor(h / 256), h % 256, scale) }
+	for y = 0, h - 1 do
+		local line = {}
+		local base = y * w
+		for x = 0, w - 1 do line[x + 1] = grid[base + x] or BLACK end
+		rows[#rows + 1] = table.concat(line)
+	end
+	return table.concat(rows)
 end
 
 ---------------------------------------------------------------- commands
@@ -362,13 +320,13 @@ function C.get(a)
 	elseif what == "area" then
 		local x1, y1, x2, y2 = X(a[2], "x1"), Y(a[3], "y1"), X(a[4], "x2"), Y(a[5], "y2")
 		local lx, ly, hx, hy = math.min(x1, x2), math.min(y1, y2), math.max(x1, x2), math.max(y1, y2)
-		if (hx - lx + 1) * (hy - ly + 1) > 100000 then errorf("area too large (max 100000 cells)") end
 		if not idName then buildNames() end
 		local counts, total = {}, 0
-		for y = ly, hy do
-			for x = lx, hx do
-				local id = sim.partID(x, y)
-				if id then
+		for id in sim.parts() do
+			local x, y = prop(id, "x"), prop(id, "y")
+			if x and y then
+				x, y = floor(x + 0.5), floor(y + 0.5)
+				if x >= lx and x <= hx and y >= ly and y <= hy then
 					local t = prop(id, "type")
 					counts[t] = (counts[t] or 0) + 1
 					total = total + 1
@@ -428,7 +386,7 @@ function C.screenshot(a)
 		x1, x2 = math.min(x1, x2), math.max(x1, x2)
 		y1, y2 = math.min(y1, y2), math.max(y1, y2)
 	end
-	return render(scale, x1, y1, x2, y2), "png"
+	return render(scale, x1, y1, x2, y2), "rgb"
 end
 
 function C.lua(_, raw)
@@ -486,18 +444,42 @@ local function disconnect(why)
 	if why then log("disconnected: " .. tostring(why)) end
 end
 
+local lastFail
+local function failOnce(m)
+	if m ~= lastFail then lastFail = m; log(m) end
+end
+
+-- Non-blocking connect: call connect() once per tick until status() reports "connected".
+local pending, pendingTicks = nil, 0
+
+local function finishConnect(s, how)
+	pending, sock, connected = nil, s, true
+	lastFail = nil
+	log("connected to " .. HOST .. ":" .. PORT .. " (" .. how .. ")")
+end
+
 local function tryConnect()
 	local ok, s = pcall(socket.tcp)
-	if not ok or not s then return end
-	-- never block the game thread: short timeout for connect, then fully non-blocking
-	pcall(function() s:settimeout(0.05) end)
+	if not ok or not s then return failOnce("socket.tcp failed: " .. tostring(s)) end
+	pcall(function() s:settimeout(0) end)
+	pending, pendingTicks = s, 0
+end
+
+local function pollPending()
+	local s = pending
+	pendingTicks = pendingTicks + 1
 	local okc, res, err = pcall(function() return s:connect(HOST, PORT) end)
-	if okc and (res == 1 or res == true or res == nil and not err) then
-		pcall(function() s:settimeout(0) end)
-		sock, connected = s, true
-		log("connected to " .. HOST .. ":" .. PORT)
-	else
+	local okst, st = pcall(function() return s:status() end)
+	st = okst and tostring(st):lower() or "error"
+	if pendingTicks <= 5 or pendingTicks % 120 == 0 then
+		log("connect poll " .. pendingTicks .. ": ok=" .. tostring(okc) .. " res=" .. tostring(res) .. " err=" .. tostring(err) .. " status=" .. st)
+	end
+	if st == "connected" then return finishConnect(s, "status") end
+	if not okc and tostring(res):find("connected socket", 1, true) then return finishConnect(s, "already connected") end
+	if st == "dead" or st == "error" or pendingTicks > 600 then
+		pending = nil
 		pcall(function() s:close() end)
+		failOnce("connect failed: status=" .. st .. " res=" .. tostring(res) .. " err=" .. tostring(err))
 	end
 end
 
@@ -509,19 +491,21 @@ local function pump()
 	-- write
 	if #txq > 0 then
 		local data = table.remove(txq, 1)
-		local okc, n, err = pcall(function() return sock:send(data) end)
+		local okc, n, err, sent = pcall(function() return sock:send(data) end)
 		if not okc then return disconnect(n) end
-		if type(n) == "number" and n < #data then
-			table.insert(txq, 1, data:sub(n + 1))
-		elseif n == nil and err and err ~= "timeout" then
-			return disconnect(err)
-		end
+		-- LuaSocket-style: on "timeout" the bytes already sent come back as the 3rd value
+		if type(n) ~= "number" and err and err ~= "timeout" then return disconnect(err) end
+		local count = type(n) == "number" and n or sent or 0
+		if count < #data then table.insert(txq, 1, data:sub(count + 1)) end
 	end
 	-- read
-	local okr, data, err = pcall(function() return sock:receive(65536) end)
+	-- LuaSocket-style: on timeout/closed the bytes read so far come back as the 3rd value
+	local okr, data, err, partial = pcall(function() return sock:receive(65536) end)
 	if not okr then return disconnect(data) end
+	if not data or #data == 0 then data = partial end
 	if data and #data > 0 then rxbuf = rxbuf .. data
-	elseif err == "closed" then return disconnect("closed by server") end
+	end
+	if err == "closed" and not rxbuf:find("\n", 1, true) then return disconnect("closed by server") end
 	while true do
 		local i = rxbuf:find("\n", 1, true)
 		if not i then break end
@@ -539,7 +523,8 @@ end
 event.register(event.tick, function()
 	ticks = ticks + 1
 	if not connected then
-		if ticks % RECONNECT_TICKS == 1 then tryConnect() end
+		if pending then pollPending()
+		elseif ticks % RECONNECT_TICKS == 1 then tryConnect() end
 		return
 	end
 	local ok, err = pcall(pump)

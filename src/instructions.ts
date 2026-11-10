@@ -25,7 +25,7 @@ INSPECTION
   elements                   list element names/ids
   get element <elem>         properties of an element
   get particle <x> <y>       particle at position
-  get area <x1> <y1> <x2> <y2>   particle counts per element in box (max 100000 cells)
+  get area <x1> <y1> <x2> <y2>   particle counts per element in box
   info                       project/stats: pause state, particle count, frame, env
 
 ENVIRONMENT
